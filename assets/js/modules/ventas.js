@@ -25,7 +25,7 @@ const SaleService = {
         return `TICKET-${count.toString().padStart(5, '0')}`;
     },
 
-    processSale: (cart, cliente, totalAmount) => {
+    processSale: (cart, cliente, totalAmount, paymentMethod = 'QR', amountPaid = 0) => {
         if (!cart || cart.length === 0) return false;
 
         const sales = SaleService.getAll();
@@ -38,6 +38,8 @@ const SaleService = {
             fecha: date,
             cliente: cliente || 'Cliente Final',
             total: totalAmount,
+            metodoPago: paymentMethod,
+            montoPagado: amountPaid,
             items: cart
         };
 
@@ -156,6 +158,10 @@ document.addEventListener('DOMContentLoaded', () => {
             document.getElementById('posTotalItems').textContent = totalItems;
             document.getElementById('posTotalAmount').textContent = `$${totalAmount.toFixed(2)}`;
 
+            if (typeof updateCalculateChange === 'function') {
+                updateCalculateChange();
+            }
+
             // Eventos del carrito
             document.querySelectorAll('.btn-minus').forEach(btn => {
                 btn.addEventListener('click', (e) => {
@@ -225,7 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const clientes = PersonService.getClients();
             clientes.forEach(c => {
                 const opt = document.createElement('option');
-                opt.value = c.nombre; // Guardamos el nombre por simplicidad en el ticket
+                opt.value = c.id; // Guardamos el ID para obtener más datos
                 opt.textContent = c.nombre;
                 posClienteSelect.appendChild(opt);
             });
@@ -237,14 +243,58 @@ document.addEventListener('DOMContentLoaded', () => {
             btnProcesar.addEventListener('click', () => {
                 if (cart.length === 0) return;
 
-                const cliente = document.getElementById('posCliente').value;
+                const clienteId = document.getElementById('posCliente').value;
+                const clienteObj = PersonService.getById(clienteId) || { nombre: 'Consumidor Final' };
                 const totalText = document.getElementById('posTotalAmount').textContent.replace('$', '');
                 const totalAmount = parseFloat(totalText);
 
-                const sale = SaleService.processSale(cart, cliente, totalAmount);
+                const method = document.querySelector('input[name="paymentMethod"]:checked')?.value || 'QR';
+                const receivedInput = document.getElementById('montoRecibido');
+                const received = method === 'Efectivo' ? parseFloat(receivedInput.value) || 0 : totalAmount;
+
+                if (method === 'Efectivo' && received < totalAmount) {
+                    Helpers.showNotification('El monto recibido es menor al total.', 'warning');
+                    return;
+                }
+
+                const sale = SaleService.processSale(cart, clienteObj, totalAmount, method, received);
                 if (sale) {
+                    const c = sale.cliente;
+                    
+                    if (typeof c === 'object' && c.email) {
+                        // ==== CONFIGURACIÓN DE EMAILJS ====
+                        // Para que esto funcione, debes registrarte en https://www.emailjs.com/
+                        // 1. Conecta tu cuenta de Gmail (Service ID).
+                        // 2. Crea un Email Template (Template ID).
+                        // 3. Obtén tu Public Key en Account -> API Keys.
+                        
+                        const EMAILJS_PUBLIC_KEY = "-1XRrarDo-uN8nYve"; // Llave pública del usuario
+                        const EMAILJS_SERVICE_ID = "service_stockflow"; // Service ID del usuario
+                        const EMAILJS_TEMPLATE_ID = "template_by85mf8"; // Template ID del usuario
+                        
+                        if (typeof emailjs !== 'undefined' && EMAILJS_PUBLIC_KEY !== "TU_PUBLIC_KEY") {
+                            emailjs.init(EMAILJS_PUBLIC_KEY);
+                            
+                            // Parámetros que tu template en EmailJS debe recibir
+                            const templateParams = {
+                                to_name: c.nombre,
+                                to_email: c.email,
+                                ticket_number: sale.ticket,
+                                total_amount: `$${parseFloat(sale.total).toFixed(2)}`
+                            };
+                            
+                            emailjs.send(EMAILJS_SERVICE_ID, EMAILJS_TEMPLATE_ID, templateParams)
+                                .then(() => console.log('Factura enviada automáticamente a:', c.email))
+                                .catch(err => console.error('Error al enviar la factura:', err));
+                        } else {
+                            console.warn("EmailJS no está configurado. Reemplaza las llaves en ventas.js para activar el envío automático.");
+                        }
+                    }
+
                     Helpers.showNotification(`Venta ${sale.ticket} procesada con éxito!`);
+
                     cart = [];
+                    if (receivedInput) receivedInput.value = '';
                     renderCart();
                     
                     // Refrescar productos (stock actualizado)
@@ -252,6 +302,49 @@ document.addEventListener('DOMContentLoaded', () => {
                     renderPosProducts(posProducts);
                 }
             });
+        }
+
+        // Init y Lógica de Métodos de Pago
+        const qrContainer = document.getElementById('qrContainer');
+        const cashContainer = document.getElementById('cashContainer');
+        const payQR = document.getElementById('payQR');
+        const payCash = document.getElementById('payCash');
+        const montoRecibido = document.getElementById('montoRecibido');
+        const montoCambio = document.getElementById('montoCambio');
+
+        window.updateCalculateChange = () => {
+            if(!payCash || !payCash.checked) return;
+            const totalText = document.getElementById('posTotalAmount').textContent.replace('$', '');
+            const total = parseFloat(totalText) || 0;
+            const received = parseFloat(montoRecibido.value) || 0;
+            const change = received - total;
+            
+            montoCambio.value = change >= 0 ? change.toFixed(2) : "0.00";
+            
+            if (btnProcesar && cart.length > 0) {
+                btnProcesar.disabled = received < total && total > 0;
+            }
+        };
+
+        const updatePaymentUI = () => {
+            if(payQR && payQR.checked) {
+                qrContainer.classList.remove('d-none');
+                cashContainer.classList.add('d-none');
+                if (btnProcesar && cart.length > 0) btnProcesar.disabled = false;
+            } else if (payCash && payCash.checked) {
+                qrContainer.classList.add('d-none');
+                cashContainer.classList.remove('d-none');
+                window.updateCalculateChange();
+            }
+        };
+
+        if (payQR && payCash) {
+            payQR.addEventListener('change', updatePaymentUI);
+            payCash.addEventListener('change', updatePaymentUI);
+        }
+
+        if (montoRecibido) {
+            montoRecibido.addEventListener('input', window.updateCalculateChange);
         }
 
         // Init
@@ -291,12 +384,13 @@ document.addEventListener('DOMContentLoaded', () => {
             paginated.forEach(s => {
                 const totalItems = s.items.reduce((sum, item) => sum + item.cantidad, 0);
                 const fecha = new Date(s.fecha).toLocaleString();
+                const clienteName = typeof s.cliente === 'object' ? s.cliente.nombre : s.cliente;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td class="fw-bold text-primary">${s.ticket}</td>
                     <td>${fecha}</td>
-                    <td>${s.cliente}</td>
+                    <td>${clienteName}</td>
                     <td class="text-center">${totalItems}</td>
                     <td class="text-end fw-bold">$${parseFloat(s.total).toFixed(2)}</td>
                     <td>
@@ -315,7 +409,8 @@ document.addEventListener('DOMContentLoaded', () => {
                     const sale = SaleService.getById(id);
                     if (sale) {
                         document.getElementById('modalTicketTitle').textContent = sale.ticket;
-                        document.getElementById('modalCliente').textContent = sale.cliente;
+                        const cName = typeof sale.cliente === 'object' ? sale.cliente.nombre : sale.cliente;
+                        document.getElementById('modalCliente').textContent = cName;
                         document.getElementById('modalFecha').textContent = new Date(sale.fecha).toLocaleString();
                         
                         const tbody = document.getElementById('modalDetalleBody');
@@ -348,9 +443,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
         const applyFilters = () => {
             const term = (document.getElementById('searchVenta')?.value || '').toLowerCase();
-            filteredSales = allSales.filter(s => 
-                s.ticket.toLowerCase().includes(term) || s.cliente.toLowerCase().includes(term)
-            );
+            filteredSales = allSales.filter(s => {
+                const clienteName = typeof s.cliente === 'object' ? s.cliente.nombre : s.cliente;
+                return s.ticket.toLowerCase().includes(term) || clienteName.toLowerCase().includes(term);
+            });
             currentPage = 1;
             renderTable();
         };
